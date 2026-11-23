@@ -57,6 +57,9 @@ jobs:
       - name: Extract DIZEUR source
         run: unzip -q DizeurAndroid-alpha-1.1.zip
 
+      - name: Inspect media controller implementation
+        run: sed -n '1,180p' DizeurAndroid/app/src/main/java/fr/dizeur/app/MediaControllerBridge.kt
+
       - name: Build debug APK
         run: gradle -p DizeurAndroid assembleDebug --no-daemon
 
