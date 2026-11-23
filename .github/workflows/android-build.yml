@@ -57,6 +57,26 @@ jobs:
       - name: Extract DIZEUR source
         run: unzip -q DizeurAndroid-alpha-1.1.zip
 
+      - name: Apply Android media API compatibility fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("DizeurAndroid/app/src/main/java/fr/dizeur/app/MediaControllerBridge.kt")
+          source = p.read_text()
+          pattern = r'    fun toggleShuffle\(context: Context\): Boolean \{.*?\n    \}'
+          replacement = '''    fun toggleShuffle(context: Context): Boolean {
+                // Android's platform PlaybackState does not expose shuffle-mode controls.
+                // Report unsupported rather than claiming a change that cannot be confirmed.
+                return false
+            }'''
+          updated, count = re.subn(pattern, replacement, source, count=1, flags=re.S)
+          if count != 1:
+              raise SystemExit("Impossible de localiser exactement toggleShuffle")
+          p.write_text(updated)
+          print("Correction appliquée : lecture aléatoire signalée indisponible.")
+          PY
+
       - name: Inspect media controller implementation
         run: sed -n '1,180p' DizeurAndroid/app/src/main/java/fr/dizeur/app/MediaControllerBridge.kt
 
