@@ -1,0 +1,103 @@
+name: Build DIZEUR signed release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check signing secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.DIZEUR_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.DIZEUR_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.DIZEUR_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.DIZEUR_KEY_PASSWORD }}
+        run: |
+          set -eu
+          for name in KEYSTORE_B64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Secret $name is missing. Configure all four DIZEUR signing secrets first."
+              exit 1
+            fi
+          done
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -eu
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager -print -quit)"
+          test -n "$SDKMANAGER"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null
+          set -o pipefail
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Extract source and apply compatibility fix
+        run: |
+          unzip -q DizeurAndroid-alpha-1.1.zip
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path("DizeurAndroid/app/src/main/java/fr/dizeur/app/MediaControllerBridge.kt")
+          s = p.read_text()
+          pattern = r'    fun toggleShuffle\(context: Context\): Boolean \{.*?\n    \}'
+          replacement = '''    fun toggleShuffle(context: Context): Boolean {
+                // Android platform PlaybackState has no portable shuffle setter.
+                return false
+            }'''
+          s, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit("Compatibility patch did not match exactly once")
+          p.write_text(s)
+          PY
+
+      - name: Build release APK
+        run: gradle -p DizeurAndroid assembleRelease --no-daemon
+
+      - name: Sign release APK
+        env:
+          KEYSTORE_B64: ${{ secrets.DIZEUR_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.DIZEUR_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.DIZEUR_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.DIZEUR_KEY_PASSWORD }}
+        run: |
+          set -eu
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/dizeur-release.jks"
+          "$BUILD_TOOLS/zipalign" -p -f 4 DizeurAndroid/app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/dizeur-aligned.apk"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/dizeur-release.jks" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:STORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out "$RUNNER_TEMP/DIZEUR-release.apk" \
+            "$RUNNER_TEMP/dizeur-aligned.apk"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$RUNNER_TEMP/DIZEUR-release.apk"
+          rm -f "$RUNNER_TEMP/dizeur-release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DIZEUR-release-signed
+          path: ${{ runner.temp }}/DIZEUR-release.apk
+          if-no-files-found: error
+          retention-days: 30
